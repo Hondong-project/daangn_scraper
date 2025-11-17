@@ -8,35 +8,43 @@ from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import json
 import re
+import os
 
 # -----------------------------
-# 1. 엑셀 읽기
+# 1. 신규 목록 CSV 읽기
 # -----------------------------
-input_file = "daangn_list.xlsx"
-df = pd.read_excel(input_file, engine="openpyxl", dtype=str)
+if os.path.exists("new_identifiers.csv"):
+    input_file = "new_identifiers.csv"
+    print("[INFO] 추가 된 신규 매물 상세 스크래핑 시작")
+elif os.path.exists("daangn_list.csv"):
+    input_file = "daangn_list.csv"
+    print("[INFO] 첫 실행이므로 전체 매물 상세 스크래핑 시작")
+else:
+    print("[ERROR] 매물 목록 파일이 없습니다. 먼저 1차 스크래핑을 실행하세요.")
+    exit()
+
+df = pd.read_csv(input_file, dtype=str, encoding="utf-8-sig")
 
 # -----------------------------
 # 2. 크롬 드라이버 설정
 # -----------------------------
-driver_path = "C:/Users/USER/Downloads/chromedriver-win64/chromedriver.exe"
+driver_path = "C:/Users/tlsgo/Downloads/chromedriver-win64 (1)/chromedriver-win64/chromedriver.exe"
 options = Options()
 options.add_argument("--headless")
 options.add_argument("--no-sandbox")
 options.add_argument("--disable-dev-shm-usage")
 options.add_argument("--disable-gpu")
+options.add_argument("--disable-software-rasterizer")
 options.add_argument("--log-level=3")
 service = Service(driver_path)
 driver = webdriver.Chrome(service=service, options=options)
 
-
 # -----------------------------
-# 3. 상세 스크래핑 함수(WebDriverWait 적용)
+# 3. 상세 스크래핑 함수
 # -----------------------------
 def scrape_detail(url):
     driver.get(url)
-
     try:
-        # dt 태그가 나타날 때까지 최대 10초 대기
         WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.TAG_NAME, "dt"))
         )
@@ -45,19 +53,14 @@ def scrape_detail(url):
         return {}
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
-
-    # dt/dd 태그 매칭
     dt_tags = [dt.get_text(strip=True) for dt in soup.find_all("dt")]
     dd_tags = [dd.get_text(strip=True) for dd in soup.find_all("dd")]
     info_dict = {dt: dd for dt, dd in zip(dt_tags, dd_tags)}
 
-    # 필요한 컬럼만 필터링
     keep_keys = ["아파트명", "건축물 용도", "전용면적", "층", "방향", "관리비", "사용승인일 (연식)"]
     filtered_info = {k: info_dict.get(k, None) for k in keep_keys}
 
-    # -----------------------------
-    # 정제
-    # -----------------------------
+    # 정제 로직 동일 (층/관리비/전용면적/연식 등)
     floor_info = filtered_info.get("층", "")
     if isinstance(floor_info, str):
         match = re.search(r"(\d+)층\s*/\s*(\d+)층", floor_info)
@@ -93,8 +96,7 @@ def scrape_detail(url):
     date_raw = filtered_info.get("사용승인일 (연식)", "")
     if date_raw:
         date_match = re.search(r"(\d{4})년\s*(\d{2})월\s*(\d{2})일", date_raw)
-        filtered_info[
-            "사용승인일 (연식)"] = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}" if date_match else None
+        filtered_info["사용승인일 (연식)"] = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}" if date_match else None
     else:
         filtered_info["사용승인일 (연식)"] = None
 
@@ -125,25 +127,82 @@ def scrape_detail(url):
 
     return filtered_info
 
-
 # -----------------------------
-# 4. 각 행 반복하여 상세 정보 추가
+# 4. 상세 정보 수집 반복
 # -----------------------------
 for idx, row in df.iterrows():
     url = row.get("identifier")
     if pd.isna(url):
         continue
-    print(f"[INFO] {idx + 1}/{len(df)} 상세 페이지 스크래핑: {url}")
+    print(f"[INFO] {idx+1}/{len(df)} 상세 페이지 수집 중: {url}")
     detail_data = scrape_detail(url)
     for k, v in detail_data.items():
-        df.at[idx, k] = v
+        df.loc[idx, k] = v
 
 # -----------------------------
-# 5. 엑셀 저장
+# 5. 컬럼 매핑 및 타입 변환
 # -----------------------------
-output_file = "daangn_list_detail.xlsx"
-df.to_excel(output_file, index=False, engine="openpyxl")
-print(f"[INFO] 최종 엑셀 저장 완료: {output_file}")
+COLUMN_MAP = {
+    "아파트명": "building_name",
+    "건축물 용도": "building_usage",
+    "전용면적": "exclusive_area",
+    "층": "floor",
+    "총층": "total_floor",
+    "방향": "direction",
+    "관리비": "maintenance_fee",
+    "사용승인일 (연식)": "built_year",
+    "가격": "price",
+    "주소": "address",
+    "등록일": "register_date",
+    "identifier": "identifier",
+    "area": "area",
+    "description": "description",
+    "image_count": "image_count",
+    "image": "image"
+}
+df = df.rename(columns=COLUMN_MAP)
 
+# -----------------------------
+# 6. 기존 상세 CSV 병합 (증분 저장)
+# -----------------------------
+output_file = "daangn_list_detail.csv"
+if os.path.exists(output_file):
+    existing_df = pd.read_csv(output_file, dtype=str, encoding="utf-8-sig")
+    merged_df = pd.concat([existing_df, df], ignore_index=True)
+    merged_df.drop_duplicates(subset=["identifier"], keep="first", inplace=True)
+else:
+    merged_df = df
+
+
+# -----------------------------
+# 7. 분석용 타입 변환 (숫자형/날짜형)
+# -----------------------------
+numeric_cols = [
+    "image_count",
+    "exclusive_area",
+    "floor",
+    "maintenance_fee",
+    "total_floor",
+    "price"
+]
+
+for col in numeric_cols:
+    if col in merged_df.columns:
+        merged_df[col] = pd.to_numeric(merged_df[col], errors="coerce")
+
+# 날짜형 변환
+if "register_date" in merged_df.columns:
+    merged_df["register_date"] = pd.to_datetime(merged_df["register_date"], errors="coerce")
+
+# -----------------------------
+# 8. CSV 저장
+# -----------------------------
+merged_df.to_csv(output_file, index=False, encoding="utf-8-sig")
+print(f"[INFO] 상세 CSV 저장 완료, 총 행 수: {len(merged_df)}")
+
+
+# -----------------------------
+# 9. 종료
+# -----------------------------
 driver.quit()
-print("[INFO] 크롬 드라이버 종료")
+print("[INFO] 크롬 드라이버 종료 완료")
